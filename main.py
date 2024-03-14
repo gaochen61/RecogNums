@@ -1,115 +1,56 @@
 import numpy as np
-import requests
+import cv2 as cv
 import gzip
-import os
-import hashlib
-import cv2
 
-# Load data
-DATA_PATH = 'data/'
-
-
-def LoadData(url):
-    fp = os.path.join(DATA_PATH, hashlib.md5(url.encode('utf-8')).hexdigest())
-    if os.path.isfile(fp):
-        with open(fp, "rb") as f:
-            data = f.read()
-    else:
-        with open(fp, "wb") as f:
-            data = requests.get(url).content
-            f.write(data)
-    return np.frombuffer(gzip.decompress(data), dtype=np.uint8).copy()
-
-
-def CreateHOGDescriptor():
-    winSize = (28, 28)
-    blockSize = (14, 14)
-    blockStride = (7, 7)
-    cellSize = (7, 7)
-    nbins = 9
-    derivAperture = 1
-    winSigma = -1.
-    histogramNormType = 0
-    L2HysThreshold = 0.2
-    gammaCorrection = 1
-    nlevels = 64
-    signedGradient = True
-
-    hog = cv2.HOGDescriptor(winSize, blockSize, blockStride, cellSize, nbins, derivAperture,
-                            winSigma, histogramNormType, L2HysThreshold, gammaCorrection, nlevels, signedGradient)
-    return hog
-
-
-def InitSVM(C=12.5, gamma=0.50625):
-    model = cv2.ml.SVM_create()
-    model.setGamma(gamma)
-    model.setC(C)
-    model.setKernel(cv2.ml.SVM_RBF)
-    model.setType(cv2.ml.SVM_C_SVC)
-    return model
-
-
-def TrainSVM(model, samples, responses, kFold=10):
-    model.trainAuto(samples, cv2.ml.ROW_SAMPLE, responses, kFold)
-    return model
-
-
-def SVMPredict(model, samples):
-    return model.predict(samples)[1].ravel()
-
-
-def EvaluateSVM(model, samples, labels):
-    predictions = SVMPredict(model, samples)
-    accuracy = (labels == predictions).mean()
-    print('Accuracy: %.2f %%' % (accuracy*100))
-
-    confusion = np.zeros((10, 10), np.int32)
-    for i, j in zip(labels, predictions):
-        confusion[int(i), int(j)] += 1
-    print('confusion matrix:')
-    print(confusion)
-
+def read_file(filename):
+    f= gzip.open(filename=filename, mode="rb")
+    content = f.read()
+    buf=np.frombuffer(content,dtype=np.uint8)
+    return buf
 
 if __name__ == "__main__":
-    # 加载数据集
-    X_train = LoadData(
-        "http://yann.lecun.com/exdb/mnist/train-images-idx3-ubyte.gz")[0x10:].reshape((-1, 28, 28))
-    Y_train = LoadData(
-        "http://yann.lecun.com/exdb/mnist/train-labels-idx1-ubyte.gz")[8:]
-    X_test = LoadData(
-        "http://yann.lecun.com/exdb/mnist/t10k-images-idx3-ubyte.gz")[0x10:].reshape((-1, 28, 28))
-    Y_test = LoadData(
-        "http://yann.lecun.com/exdb/mnist/t10k-labels-idx1-ubyte.gz")[8:]
+    # 读取文件中的图片，放到矩阵中
+    x_train=read_file("./train-images-idx3-ubyte.gz")[16:].reshape((-1, 28, 28))
+    y_train=read_file("./train-labels-idx1-ubyte.gz")[8:]
+    x_test=read_file("./t10k-images-idx3-ubyte.gz")[16:].reshape((-1, 28, 28))
+    y_test = read_file("./t10k-labels-idx1-ubyte.gz")[8:]
 
-    print("The data is loaded.")
+    #显示一张图片和这张图片的标签
+    # cv.imshow("win",x_train[0])
+    # print(y_train[0])
+    # cv.waitKey(0)
+    # cv.destroyAllWindows()
 
-    # 提取训练集的HOG特征
-    hog = CreateHOGDescriptor()
-    hog_descriptors = []
-    for img in X_train:
+    #计算每张图片的hog描述子
+    hog = cv.HOGDescriptor((28,28), (14,14), (7,7), (7,7), 9, 1,-1, 0,0.2,True, 64, True)
+    hog_descriptors=[]
+    for img in x_train:
         hog_descriptors.append(hog.compute(img))
+    hog_descriptors=np.squeeze(hog_descriptors)
 
-    hog_descriptors = np.squeeze(hog_descriptors)
+    #获得svm模型
+    model = cv.ml.SVM_create()
+    model.setGamma(0.50625)
+    model.setC(12.5)
+    model.setKernel(cv.ml.SVM_RBF)
+    model.setType(cv.ml.SVM_C_SVC)
 
-    print('Traning svm classifier...')
-    # 加载SVM分类器模型进行训练
-    svm_model = InitSVM()
-    train_labels = np.array(Y_train, dtype=np.int32)
-    TrainSVM(svm_model, hog_descriptors, train_labels)
-
-    # 训练完后保存模型
-    svm_model.save('svm.xml')
+    #进行训练
+    train_labels = np.array(y_train, dtype=np.int32)
+    print("begin training")
+    model.trainAuto(hog_descriptors, cv.ml.ROW_SAMPLE, train_labels, 10)
+    print("end training")
+    model.save('svm.xml')
     hog.save('hog_descriptor.xml')
-    print('The model are saved to xml file.')
 
-    # 提取测试集的HOG特征
+    #计算测试用图片的hog描述子
     hog_descriptors_test = []
-    for img in X_test:
+    for img in x_test:
         hog_descriptors_test.append(hog.compute(img))
     hog_descriptors_test = np.squeeze(hog_descriptors_test)
 
-    print('Evaluating model...')
-    # 在测试集上测试模型的准确率并打印混淆矩阵
-    test_labels = np.array(Y_test, dtype=np.int32)
-    EvaluateSVM(svm_model, hog_descriptors_test, test_labels)
-    print('Done.')
+    #判断训练成果
+    test_labels = np.array(y_test, dtype=np.int32)
+    predictions=model.predict(hog_descriptors_test)[1].ravel()
+    accuracy=(test_labels==predictions).mean()
+    print('Accuracy: %.2f %%' % (accuracy * 100))
